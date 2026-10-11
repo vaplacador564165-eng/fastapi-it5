@@ -1,10 +1,17 @@
-# Beginner FastAPI + SQLite Inventory System
+# Supply Room Inventory System (FastAPI + SQLite)
 
-This project keeps the original starter project's structure and changes the example from students to inventory items. It uses FastAPI for the API, Pydantic for input validation, and SQLite to store item records.
+## Problem and purpose
+
+Schools and small offices often track supplies on paper or in a single spreadsheet. Stock counts drift,
+nobody records who took what, and shortages are noticed only when something runs out. This system gives
+the stockroom staff one place to keep items by category, issue supplies to people, record deliveries, and
+see which items are running low. Every change to stock is logged, so the quantity on hand can always be
+explained by the movement history.
+
+Intended users: stockroom staff / property custodians (they issue and restock supplies) and the
+administrators who review stock levels and history.
 
 ## Run it on Windows
-
-From this folder, create and activate a virtual environment, install dependencies, and start the API:
 
 ```powershell
 py -m venv .venv
@@ -13,42 +20,71 @@ python -m pip install -r requirements.txt
 python -m uvicorn main:app --reload
 ```
 
-Open <http://127.0.0.1:8000/docs> to try the API in the interactive documentation.
+Open <http://127.0.0.1:8000/docs> to try the API.
 
-## Project structure
+If you have an `inventory.db` from the earlier single-table version, delete it first. The new `category_id`
+column cannot be added by `CREATE TABLE IF NOT EXISTS`, and the file is regenerated on startup.
 
-- `main.py` creates the FastAPI app and defines the routes.
-- `app/database.py` opens SQLite connections and creates the inventory table.
-- `app/models.py` defines the Pydantic item data classes and database operations.
-- `inventory.db` is created automatically when the app first runs.
-- `requirements.txt` lists the Python dependencies.
+## Database design
 
-## Item fields
+| Table | Purpose | Keys |
+|---|---|---|
+| `categories` | Groups of items (unique name) | PK `id` |
+| `items` | Supplies and quantity on hand | PK `id`, FK `category_id` -> `categories.id` |
+| `stock_movements` | Log of every issue and restock | PK `id`, FK `item_id` -> `items.id` |
 
-Each item has an automatically generated `id`, a `name`, a `description`, a `quantity`, and a `price`. Quantity and price cannot be negative. The API validates input before saving it to the database.
+Relationships: one category has many items; one item has many stock movements. Foreign keys use
+`ON DELETE RESTRICT`, so a category with items, or an item with history, cannot be deleted. SQLite only
+enforces foreign keys when `PRAGMA foreign_keys = ON` is set, which `database_connection()` does for every
+connection. `CHECK` constraints keep quantity and price non-negative and movement quantity positive.
 
-Example request body:
+## Transactional workflow
 
-```json
-{
-  "name": "Notebook",
-  "description": "A4 ruled notebook",
-  "quantity": 25,
-  "price": 49.5
-}
-```
+`POST /items/{id}/issue` (issue supplies to a person) does three things in one database transaction:
+
+1. confirm the item exists,
+2. lower `items.quantity` with `UPDATE ... WHERE quantity >= requested` (the stock check and the decrement
+   are a single atomic statement),
+3. insert an `ISSUE` row in `stock_movements`.
+
+If stock is insufficient, nothing is written and the API returns `400`. `POST /items/{id}/restock` is the
+reverse (a delivery) and logs a `RESTOCK` row. `database_connection()` commits on success and rolls back on
+any exception, so the quantity and the log can never disagree.
+
+## Object-oriented design
+
+- Pydantic classes (`ItemInput`, `CategoryInput`, `IssueInput`, `RestockInput`) validate input.
+- `Category`, `Item`, and `StockMovement` each own the database operations for their table.
+- Inheritance: `Item(ItemInput)` and `Category(CategoryInput)` extend their input schemas with an `id`.
+- Domain errors (`ItemNotFoundError`, `InsufficientStockError`, ...) derive from `InventoryError`; one
+  exception handler in `main.py` turns them into HTTP responses, which keeps routes thin.
+- The database connection is injected into each method, so the models do not depend on a global.
 
 ## API endpoints
 
-- `GET /` returns a welcome message.
-- `GET /items` lists all inventory items.
-- `GET /items/{item_id}` gets one item by ID.
-- `POST /items` adds an item.
-- `PUT /items/{item_id}` updates an existing item.
-- `DELETE /items/{item_id}` deletes an item.
+| Method | Path | Description |
+|---|---|---|
+| GET | `/` | Welcome message |
+| GET / POST | `/categories` | List / create category |
+| GET / PUT / DELETE | `/categories/{id}` | Read / update / delete category |
+| GET | `/items?search=&category_id=` | List and search items |
+| GET | `/items/low-stock?threshold=5` | Items at or below the threshold |
+| POST | `/items` | Create item (optional `category_id`) |
+| GET / PUT / DELETE | `/items/{id}` | Read / update / delete item |
+| POST | `/items/{id}/issue` | Issue supplies (transaction) |
+| POST | `/items/{id}/restock` | Receive supplies (transaction) |
+| GET | `/items/{id}/movements` | Movement history, newest first |
 
-The API returns a `404` response when an item ID does not exist. Try the endpoints in `/docs`.
+Example issue request body:
 
-## Database notes
+```json
+{ "quantity": 3, "issued_to": "Ms. Cruz", "note": "Grade 7 classroom" }
+```
 
-The application creates `inventory.db` and the `items` table automatically. SQL queries use `?` placeholders to safely pass values into queries. The previous `students.db` file is not used by this inventory version.
+## Project structure
+
+- `main.py` creates the app, defines the routes, and maps domain errors to HTTP responses.
+- `app/database.py` opens SQLite connections and creates the three tables.
+- `app/models.py` holds the schemas, domain errors, and database operations.
+- `tests/test_api.py` has API tests (`pip install pytest httpx`, then `python -m pytest`).
+- `inventory.db` is created automatically on first run and is git-ignored.
