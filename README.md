@@ -88,3 +88,5 @@ Example issue request body:
 - `app/models.py` holds the schemas, domain errors, and database operations.
 - `tests/test_api.py` has API tests (`pip install pytest httpx`, then `python -m pytest`).
 - `inventory.db` is created automatically on first run and is git-ignored.
+## Status
+Project updated.
